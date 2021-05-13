@@ -1,0 +1,21 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: simplerun
+  namespace: demo
+spec:
+  params:
+    - name: git-url
+      value: 'https://github.com/weimeilin79/camel-quarkus-example-tekton.git'
+    - name: git-revision
+      value: main
+    - name: IMAGE
+      value: test
+  pipelineRef:
+    name: new-pipeline
+  serviceAccountName: pipeline
+  timeout: 1h0m0s
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim: 
+        claimName: my-working-source

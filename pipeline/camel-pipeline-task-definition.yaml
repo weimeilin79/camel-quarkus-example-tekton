@@ -1,0 +1,325 @@
+# ---------------------------------------------------------------------------
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ---------------------------------------------------------------------------
+
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: move-old
+spec:
+  params:
+    - default: camel-hello-quarkus
+      description: Name of rouote
+      name: appname
+      type: string
+    - default: uatdemo
+      description: The destination namespace
+      name: destinationns
+      type: string
+    - default: latest
+      description: The destination tag
+      name: destinationtag
+      type: string
+  steps:
+    - name: move-old
+      image: quay.io/openshift/origin-cli:latest
+      command: ["/bin/bash", "-c"]
+      args:
+        - |-
+          oc tag $(inputs.params.destinationns)/$(inputs.params.appname):latest $(inputs.params.destinationns)/$(inputs.params.appname):old  -n $(inputs.params.destinationns)
+
+          oc delete svc $(inputs.params.appname) --ignore-not-found -n $(inputs.params.destinationns)
+
+          oc delete deployment $(inputs.params.appname) -n $(inputs.params.destinationns) --ignore-not-found
+
+          oc delete svc $(inputs.params.appname)-old --ignore-not-found -n $(inputs.params.destinationns)
+
+          oc delete deployment $(inputs.params.appname)-old --ignore-not-found -n $(inputs.params.destinationns)
+
+          oc new-app --name=$(inputs.params.appname)-old --image-stream=$(inputs.params.destinationns)/$(inputs.params.appname):old -n $(inputs.params.destinationns)
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy-new
+spec:
+  params:
+    - default: camel-hello-quarkus
+      description: Name of rouote
+      name: appname
+      type: string
+    - default: newdemo
+      description: The source namespace
+      name: sourcens
+      type: string
+    - default: 1.0.0-SNAPSHOT
+      description: The source tag
+      name: sourcetag
+      type: string
+    - default: uatdemo
+      description: The destination namespace
+      name: destinationns
+      type: string
+    - default: latest
+      description: The destination tag
+      name: destinationtag
+      type: string
+  steps:
+    - name: create-new
+      image: quay.io/openshift/origin-cli:latest
+      workingDir: /workspace/source 
+      command: ["/bin/bash", "-c"]
+      args:
+        - |-
+          oc tag $(inputs.params.sourcens)/$(inputs.params.appname):$(inputs.params.sourcetag) $(inputs.params.destinationns)/$(inputs.params.appname):$(inputs.params.destinationtag) -n $(inputs.params.destinationns)
+          oc new-app --image-stream=$(inputs.params.destinationns)/$(inputs.params.appname):$(inputs.params.destinationtag) -n $(inputs.params.destinationns)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: canary-release
+spec:
+  params:
+    - default: camel-hello-quarkus
+      description: Name of rouote
+      name: appname
+      type: string
+    - default: uatdemo
+      description: The destination namespace
+      name: destinationns
+      type: string
+    - default: '90'
+      description: The weight of older service
+      name: oldweight
+      type: string
+    - default: '10'
+      description: The weight of new service
+      name: newweight
+      type: string
+  steps:
+    - name: create-new
+      image: quay.io/openshift/origin-cli:latest
+      workingDir: /workspace/source 
+      command: ["/bin/bash", "-c"]
+      args:
+        - |-
+          oc delete route $(inputs.params.appname) --ignore-not-found -n $(inputs.params.destinationns)
+          oc expose svc $(inputs.params.appname) -n $(inputs.params.destinationns)
+          oc patch route/$(inputs.params.appname) --patch '{"spec": {"alternateBackends": [{"kind": "Service","name": "$(inputs.params.appname)-old","weight": $(inputs.params.oldweight)}]}}' -n $(inputs.params.destinationns)
+          oc patch route/$(inputs.params.appname) --patch '{"spec": {"to": {"kind": "Service","name": "$(inputs.params.appname)","weight": $(inputs.params.newweight)}}}' -n $(inputs.params.destinationns)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: camel-run-test
+spec:
+  params:
+    - name: file
+      description: Test Camel Integration
+  steps:
+    - name: run-yaks
+      image: yaks/yaks:0.4.0-202103310025
+      workingDir: /workspace
+      command:
+        - yaks
+      args:
+        - "test"
+        - "--settings=namespace.properties"
+        - "$(params.file)"
+  workspaces:
+    - mountPath: /workspace
+      name: output
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy-camel
+spec:
+  params:
+    - default: /workspace
+      description: The working directory
+      name: workDir
+      type: string
+    - default: newdemo
+      description: The Namespace to deploy your Camel Quarkus App
+      name: deploynamespace
+      type: string
+  steps:
+    - name: name-space-change
+      command:
+        - oc 
+        - project
+        - $(params.deploynamespace)
+      image: quay.io/redhatintegration/pipelinetool
+      imagePullPolicy: IfNotPresent
+    - name: build-package-project
+      command:
+        - mvn
+        - clean
+        - package
+        - '-Dquarkus.kubernetes.deploy=true'
+        - '-Dquarkus.openshift.expose=true'
+      image: quay.io/redhatintegration/pipelinetool
+      imagePullPolicy: IfNotPresent
+      resources: {}
+      workingDir: $(params.workDir)
+  workspaces:
+    - mountPath: /workspace
+      name: output
+---
+
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: camel-quarkus-pipeline
+spec:
+  workspaces:
+    - name: shared-workspace # Name of the workspace in the Pipeline
+  params: 
+    - name: git-url
+      type: string
+      description: url of the git repo for the code of deployment
+      default: "https://github.com/weimeilin79/camel-quarkus-example-tekton.git"
+    - name: git-revision
+      type: string
+      description: revision to be used from repo of the code for deployment
+      default: "main"
+    - name: appname
+      type: string
+      description: Name of your application
+      default: "camel-hello-quarkus"
+    - name: destinationns
+      type: string
+      description: Destination Namespace
+      default: "uatdemo"
+    - name: destinationtag
+      type: string
+      description: Tag for current image stream operating version
+      default: "latest"
+    - name: sourcens
+      type: string
+      description: Source Image Namespace
+      default: "newdemo"
+    - name: sourcetag
+      type: string
+      description: Tag for source image stream operating version
+      default: "1.0.0-SNAPSHOT"
+    - name: oldweight
+      type: string
+      description: Routing weight for OLD service
+      default: '90'
+    - name: newweight
+      type: string
+      description: Routing weight for NEW service
+      default: '10'
+  resources: []
+  tasks:
+    - name: fetch-git
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: subdirectory
+          value: ''
+        - name: deleteExisting
+          value: 'true'
+        - name: revision
+          value: $(params.git-revision)
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: deploy-camel-app
+      params:
+        - name: workDir
+          value: /workspace
+      runAfter:
+        - fetch-git
+      taskRef:
+        kind: Task
+        name: deploy-camel
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: run-success-test
+      runAfter: [deploy-camel-app]
+      taskRef:
+        name: camel-k-run-test
+      params:
+        - name: file
+          value: "test/success.feature"
+      workspaces:
+      - name: output
+        workspace: shared-workspace
+    - name: run-failure-test
+      runAfter: [deploy-camel-app]
+      taskRef:
+        name: camel-k-run-test
+      params:
+        - name: file
+          value: "test/failure.feature"
+      workspaces:
+      - name: output
+        workspace: shared-workspace
+    - name: move-old
+      params:
+        - name: appname
+          value: $(params.appname)
+        - name: destinationns
+          value: $(params.destinationns)
+        - name: destinationtag
+          value: $(params.destinationns)
+      runAfter: [run-success-test,run-failure-test]
+      taskRef:
+        kind: Task
+        name: move-old
+    - name: deploy-new
+      params:
+        - name: appname
+          value: $(params.appname)
+        - name: sourcens
+          value: $(params.sourcens)
+        - name: sourcetag
+          value: $(params.sourcetag)
+        - name: destinationns
+          value: $(params.destinationns)
+        - name: destinationtag
+          value: $(params.destinationtag)
+      runAfter:
+        - move-old
+      taskRef:
+        kind: Task
+        name: deploy-new
+    - name: canary-release
+      params:
+        - name: appname
+          value: $(params.appname)
+        - name: destinationns
+          value: $(params.destinationns)
+        - name: oldweight
+          value: $(params.oldweight)
+        - name: newweight
+          value: $(params.newweight)
+      runAfter:
+        - deploy-new
+      taskRef:
+        kind: Task
+        name: canary-release
+      
